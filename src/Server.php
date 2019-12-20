@@ -4,19 +4,20 @@ declare(strict_types=1);
 
 namespace SocketIO;
 
-use Co\Channel;
+use Swoole\Coroutine\Channel;
+use SocketIO\Engine\Payload\ChannelPayload;
 use SocketIO\Engine\Payload\ConfigPayload;
 use SocketIO\Engine\Server as EngineServer;
 use SocketIO\Enum\Message\PacketTypeEnum;
 use SocketIO\Enum\Message\TypeEnum;
 use SocketIO\Event\EventPayload;
 use SocketIO\Event\EventPool;
-use SocketIO\Storage\Table\EventListenerTable;
-use SocketIO\Storage\Table\ListenerEventTable;
+use SocketIO\Storage\Table\ListenerSessionTable;
 use SocketIO\Storage\Table\ListenerTable;
 use SocketIO\Parser\WebSocket\Packet;
 use SocketIO\Parser\WebSocket\PacketPayload;
-use SocketIO\Storage\Table\SessionTable;
+use SocketIO\Storage\Table\NamespaceSessionTable;
+use SocketIO\Storage\Table\SessionListenerTable;
 use Swoole\WebSocket\Server as WebSocketServer;
 use SocketIO\ExceptionHandler\InvalidEventException;
 
@@ -154,16 +155,17 @@ class Server
             EventPool::getInstance()->push($eventPayload);
 
             go(function () use ($chan, $eventName, $callback) {
-                while($data = $chan->pop()) {
-                    $webSocketServer = $data['webSocketServer'] ?? null;
-                    $fd = $data['fd'] ?? 0;
-                    $message = $data['message'] ?? '';
+                /** @var ChannelPayload $channelPayload */
+                while($channelPayload = $chan->pop()) {
+                    $webSocketServer = $channelPayload->getWebSocketServer() ?? null;
+                    $message = $channelPayload->getMessage() ?? '';
+                    $fd = $channelPayload->getFd() ?? 0;
 
                     $this->setWebSocketServer($webSocketServer);
+                    $this->setMessage($message);
                     if ($fd != 0) {
                         $this->setFd($fd);
                     }
-                    $this->setMessage($message);
 
                     $callback($this);
                 }
@@ -191,18 +193,39 @@ class Server
     }
 
     /**
+     * @param string $eventName
      * @param string $data
+     *
      * @throws \Exception
      */
-    public function broadcast(string $data)
+    public function broadcast(string $eventName, string $data)
     {
-        $listeners = ListenerTable::getInstance()->getListener();
-        if (!empty($listeners)) {
-            foreach ($listeners as $listener) {
-                $this->webSocketServer->push(intval($listener), $data);
+        $packetPayload = new PacketPayload();
+        $packetPayload
+            ->setNamespace($this->namespace)
+            ->setEvent($eventName)
+            ->setType(TypeEnum::MESSAGE)
+            ->setPacketType(PacketTypeEnum::EVENT)
+            ->setMessage(json_encode($data));
+
+        $sids = NamespaceSessionTable::getInstance()->get($this->namespace);
+
+        if (!empty($sids)) {
+            $sidMapFd = SessionListenerTable::getInstance()->transformSessionToListener($sids);
+            if (!empty($sidMapFd)) {
+                foreach ($sidMapFd as $sid => $fd) {
+                    if (isset($sidMapFd[$sid])) {
+                        $this->webSocketServer->push($fd, Packet::encode($packetPayload));
+                    } else {
+                        // remove sid from NamespaceSessionTable
+                        NamespaceSessionTable::getInstance()->pop($this->namespace, $sid);
+                    }
+                }
+            } else {
+                echo "broadcast failed, transform Sid to fd return empty\n";
             }
         } else {
-            $this->webSocketServer->push($this->fd, $data);
+            echo "broadcast failed, this namespace has not sid\n";
         }
     }
 
@@ -215,9 +238,9 @@ class Server
 
     private function initTables()
     {
-        SessionTable::getInstance();
-        EventListenerTable::getInstance();
-        ListenerEventTable::getInstance();
+        NamespaceSessionTable::getInstance();
+        ListenerSessionTable::getInstance();
+        SessionListenerTable::getInstance();
         ListenerTable::getInstance();
     }
 }

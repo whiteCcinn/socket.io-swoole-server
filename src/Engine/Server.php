@@ -4,16 +4,16 @@ declare(strict_types=1);
 
 namespace SocketIO\Engine;
 
+use SocketIO\Engine\Payload\ChannelPayload;
 use SocketIO\Engine\Payload\ConfigPayload;
 use SocketIO\Engine\Payload\HttpResponsePayload;
 use SocketIO\Engine\Payload\PollingPayload;
 use SocketIO\Engine\Transport\Xhr;
 use SocketIO\Enum\Message\TypeEnum;
 use SocketIO\Event\EventPool;
-use SocketIO\Storage\table\EventListenerTable;
-use SocketIO\Storage\table\ListenerEventTable;
+use SocketIO\Storage\Table\ListenerSessionTable;
 use SocketIO\Storage\table\ListenerTable;
-use SocketIO\Storage\table\SessionTable;
+use SocketIO\Storage\table\SessionListenerTable;
 use SocketIO\Parser\WebSocket\Packet;
 use SocketIO\Parser\WebSocket\PacketPayload;
 use Swoole\WebSocket\Server as WebSocketServer;
@@ -60,7 +60,7 @@ class Server
 
         $this->server->set([
             'open_http_protocol' => true,
-            'worker_num' => $configPayload->getWorkerNum() ?? 1,
+            'worker_num' => $configPayload->getWorkerNum() ?? 2,
             'daemonize' => $configPayload->getDaemonize() ?? 0
         ]);
 
@@ -74,6 +74,9 @@ class Server
         $this->server->start();
     }
 
+    /**
+     * block event listening
+     */
     public function onWorkerStart()
     {
         $callback = $this->callback;
@@ -173,12 +176,17 @@ class Server
             $sid = $request->get['sid'] ?? '';
 
             if ($eio == 3 && $transport == 'websocket' && !empty($sid)) {
-                SessionTable::getInstance()->push($sid, $request->fd);
+                SessionListenerTable::getInstance()->push($sid, $request->fd);
+                ListenerSessionTable::getInstance()->push(strval($request->fd), $sid);
 
                 $this->produceEvent($server, '/', 'connection', $request->fd);
+            } else {
+                echo "invalid params\n";
+                $server->close($request->fd);
             }
         } else {
             echo "illegal uri\n";
+            $server->close($request->fd);
         }
     }
 
@@ -218,14 +226,19 @@ class Server
     /**
      * @param WebSocketServer $server
      * @param int $fd
+     *
+     * @throws \Exception
      */
     public function onClose(WebSocketServer $server, int $fd)
     {
-        echo "client {$fd} closed\n";
+        $sid = ListenerSessionTable::getInstance()->pop(strval($fd));
+        $fd = SessionListenerTable::getInstance()->pop($sid);
+
+        ListenerTable::getInstance()->pop(strval($fd));
 
         $this->produceEvent($server, '/', 'disconnect', $fd);
 
-        // todo clear table event and fd
+        echo "client closed sid: {$sid}, fd: {$fd}\n";
     }
 
     /**
@@ -240,8 +253,6 @@ class Server
         $namespace = $packetPayload->getNamespace();
         $eventName = $packetPayload->getEvent();
 
-        EventListenerTable::getInstance()->push($namespace, $eventName, $fd);
-        ListenerEventTable::getInstance()->push($namespace, $eventName, strval($fd));
         ListenerTable::getInstance()->push(strval($fd));
 
         $this->produceEvent($server, $namespace, $eventName, $fd, $packetPayload->getMessage());
@@ -257,15 +268,19 @@ class Server
     private function produceEvent(WebSocketServer $server, string $namespace, string $event, int $fd, string $message = '')
     {
         $eventPayload = EventPool::getInstance()->get($namespace, $event);
-        if (!is_null($eventPayload)) {
-            $chan = $eventPayload->getChan();
 
-            go(function () use ($chan, $server, $fd, $message) {
-                $chan->push([
-                    'webSocketServer' =>  $server,
-                    'fd' => $fd,
-                    'message' => $message
-                ]);
+        $chan = $eventPayload->getChan();
+
+        if (!is_null($chan)) {
+
+            $channelPayload = new ChannelPayload();
+            $channelPayload
+                ->setWebSocketServer($server)
+                ->setFd($fd)
+                ->setMessage($message);
+
+            go(function () use ($chan, $channelPayload) {
+                $chan->push($channelPayload);
             });
         } else {
             echo "EventPool not found this namespace[{$namespace}] and event[{$event}]\n";

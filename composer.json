@@ -18,7 +18,13 @@
       "SocketIO\\": "src"
     }
   },
+  "autoload-dev": {
+    "psr-4": {
+      "SocketIOTest\\": "tests"
+    }
+  },
   "require-dev": {
-    "swoole/ide-helper": "@dev"
+    "swoole/ide-helper": "@dev",
+    "phpunit/phpunit": "^7.5"
   }
 }

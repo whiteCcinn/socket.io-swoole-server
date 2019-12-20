@@ -7,44 +7,44 @@ namespace SocketIO\Storage\Table;
 use Swoole\Table;
 
 /**
- * Class SessionTable
+ * Class SessionListenerTable
+ *
+ * sid => [ 'fd' => 1 ]
  *
  * @package SocketIO\Storage\Table
  */
-class SessionTable
+class SessionListenerTable extends BaseTable
 {
-    /** @var string */
-    const KEY = 'fd';
-
-    /**
-     * eg. sid => [ 'fd' => 1 ]
-     * @var Table
-     */
-    private $table;
-
-    /** @var ListenerTable */
+    /** @var SessionListenerTable */
     private static $instance = null;
 
     private function __construct(){}
 
-    public static function getInstance()
+    /**
+     * @param int $row
+     *
+     * @return SessionListenerTable
+     */
+    public static function getInstance(int $row = 65535)
     {
         if (is_null(self::$instance)) {
             self::$instance = new self();
 
-            self::$instance->initTable();
+            self::$instance->initTable($row);
         }
 
         return self::$instance;
     }
 
     /**
-     * @param int $raw default raw 1
+     * @param int $row
      */
-    private function initTable(int $raw = 65535)
+    private function initTable(int $row)
     {
-        $this->table = new Table($raw);
-        $this->table->column(self::KEY, Table::TYPE_INT);
+        $this->tableKey = 'fd';
+
+        $this->table = new Table($row);
+        $this->table->column($this->tableKey, Table::TYPE_INT);
         $this->table->create();
     }
 
@@ -59,7 +59,7 @@ class SessionTable
     public function push(string $sid, int $fd) : bool
     {
         $value = [
-            self::KEY => $fd
+            $this->tableKey => $fd
         ];
 
         return $this->setTable($sid, $value);
@@ -73,7 +73,7 @@ class SessionTable
     public function pop(string $sid) : int
     {
         if ($this->table->exist($sid)) {
-            $value = $this->table->get($sid, self::KEY);
+            $value = $this->table->get($sid, $this->tableKey);
             if ($value) {
                 if ($this->table->del($sid)) {
                     return $value;
@@ -97,12 +97,36 @@ class SessionTable
      */
     public function get(string $sid) : int
     {
-        $value = $this->table->get($sid, self::KEY);
+        $value = $this->table->get($sid, $this->tableKey);
         if ($value !== false) {
             return $value;
         } else {
-            throw new \Exception('get table key return false');
+            return -1;
         }
+    }
+
+    /**
+     * @param array $sids
+     *
+     * @return array
+     *
+     * @throws \Exception
+     */
+    public function transformSessionToListener(array $sids) : array
+    {
+        if (!empty($sids)) {
+            $fds = [];
+            foreach ($sids as $sid) {
+                $fd = $this->get($sid);
+                if ($fd !== -1) {
+                    $fds[$sid] = $fd;
+                }
+            }
+
+            return $fds;
+        }
+
+        return [];
     }
 
     /**
@@ -111,22 +135,5 @@ class SessionTable
     public function count() : int
     {
         return $this->table->count();
-    }
-
-    /**
-     * @param string $key
-     * @param array $value
-     *
-     * @return bool
-     *
-     * @throws \Exception
-     */
-    private function setTable(string $key, array $value): bool
-    {
-        if ($this->table->set($key, $value)) {
-            return true;
-        } else {
-            throw new \Exception('set table key error');
-        }
     }
 }
